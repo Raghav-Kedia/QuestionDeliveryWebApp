@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Neo Aurora base tokens (light) */
+  --background: 0 0% 98%; /* maps to #F9FAFB */
+  --foreground: 222.2 84% 4.9%;
+
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 84% 4.9%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 84% 4.9%;
+
+  --border: 214.3 31.8% 91.4%; /* ~ #E5E7EB */
+  --input: 214.3 31.8% 91.4%;
+
+  /* Primary mapped to Neo Aurora primary base */
+  --primary: 248 53% 60%; /* approx #6A5ACD */
+  --primary-foreground: 0 0% 100%;
+
+  /* Secondary mapped */
+  --secondary: 181 100% 41%; /* approx #00CED1 */
+  --secondary-foreground: 210 40% 98%;
+
+  /* Accent base uses pink for default accent */
+  --accent: 321 100% 71%; /* #FF6EC7 */
+  --accent-foreground: 0 0% 100%;
+
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  --ring: 248 53% 60%;
+
+  /* Base radius can be overridden by component-specific radii */
+  --radius: 0.75rem;
+
+  /* Neo Aurora custom utilities */
+  --na-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+
+.dark {
+  --background: 228 18% 13%; /* #1C1E26 */
+  --foreground: 210 40% 98%;
+
+  --muted: 220 14% 22%;
+  --muted-foreground: 215 20% 65%;
+
+  --popover: 228 18% 13%;
+  --popover-foreground: 210 40% 98%;
+
+  --card: 228 18% 13%;
+  --card-foreground: 210 40% 98%;
+
+  --border: 220 10% 30%; /* ~ #374151 */
+  --input: 220 10% 30%;
+
+  --primary: 248 53% 60%;
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 181 100% 41%;
+  --secondary-foreground: 210 40% 98%;
+
+  --accent: 321 100% 71%;
+  --accent-foreground: 0 0% 100%;
+
+  --destructive: 0 63% 45%;
+  --destructive-foreground: 0 0% 100%;
+
+  --ring: 248 53% 60%;
+}
+
+* {
+  @apply border-border;
+}
+body {
+  @apply bg-background text-foreground font-sans antialiased;
+}
+
+/* Neo Aurora helpers */
+.na-gradient {
+  @apply bg-na-gradient text-white;
+}
+.na-shadow {
+  box-shadow: var(--na-shadow);
+}
+.na-transition {
+  transition: all 0.3s ease-in-out;
+}
+
+/* Button, Card, Input radii utilities (optional helper classes) */
+.na-rounded-btn { border-radius: 1rem; }
+.na-rounded-card { border-radius: 1.25rem; }
+.na-rounded-input { border-radius: 0.75rem; }
+
+/* Code font */
+code, pre { font-family: 'Fira Code', monospace; }

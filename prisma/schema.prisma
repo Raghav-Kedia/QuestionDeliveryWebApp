@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  // Use a direct connection for Prisma CLI (migrate/pull) while app uses pooled DATABASE_URL
+  directUrl = env("DIRECT_URL")
+}
+
+// Phase 2 — Full schema per specification
+model User {
+  id        String         @id @default(uuid())
+  email     String         @unique
+  username  String?        @unique
+  passwordHash String?
+  role      String
+  createdAt DateTime       @default(now())
+  activity  UserActivity[]
+}
+
+model Session {
+  id        String     @id @default(uuid())
+  target    Int
+  uploaded  Int        @default(0)
+  startedAt DateTime?
+  endedAt   DateTime?
+  active    Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  questions Question[]
+}
+
+model Question {
+  id         String         @id @default(uuid())
+  sessionId  String
+  session    Session        @relation(fields: [sessionId], references: [id])
+  number     Int
+  imageUrl   String
+  status     String         @default("locked")
+  unlockTime DateTime?
+  createdAt  DateTime       @default(now())
+  activity   UserActivity[]
+
+  @@unique([sessionId, number])
+  @@index([sessionId])
+}
+
+model UserActivity {
+  id         String   @id @default(uuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id])
+  studentId  String
+  student    User     @relation(fields: [studentId], references: [id])
+  action     String
+  timestamp  DateTime @default(now())
+
+  @@index([questionId])
+  @@index([studentId])
+}
