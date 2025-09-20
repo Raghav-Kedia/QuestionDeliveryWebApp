@@ -7,7 +7,7 @@ export async function GET() {
   if (!me) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const session = await prisma.session.findFirst({ where: { active: true }, orderBy: { createdAt: 'desc' } })
-  if (!session) return NextResponse.json({ sessionId: null, startedAt: null, questions: [] })
+  if (!session) return NextResponse.json({ sessionId: null, startedAt: null, target: 0, questions: [] })
   const questions = await prisma.question.findMany({ where: { sessionId: session.id }, orderBy: { number: 'asc' } })
   const qn = questions.map((q) => ({
     ...q,
@@ -17,6 +17,7 @@ export async function GET() {
   return NextResponse.json({
     sessionId: session.id,
     startedAt: session.startedAt ? (session.startedAt as Date).toISOString() : null,
+    target: session.target,
     questions: qn,
   })
 }

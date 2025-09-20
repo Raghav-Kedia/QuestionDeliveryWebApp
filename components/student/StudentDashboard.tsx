@@ -17,9 +17,12 @@ type Question = {
   createdAt: string
 }
 
-export default function StudentDashboard({ sessionId, startedAt: initialStartedAt, target, questions: initialQuestions }: { sessionId: string | null; startedAt: string | null; target: number; questions: Question[] }) {
+export default function StudentDashboard({ sessionId, startedAt: initialStartedAt, target: initialTarget, questions: initialQuestions }: { sessionId: string | null; startedAt: string | null; target: number; questions: Question[] }) {
+  // Local mirrors that can be reset if the session ends server-side
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(sessionId)
   const [questions, setQuestions] = useState<Question[]>(initialQuestions)
   const [startedAt, setStartedAt] = useState<string | null>(initialStartedAt)
+  const [target, setTarget] = useState<number>(initialTarget)
   const completed = questions.filter((q) => q.status === 'completed').length
 
   // Countdown to next unlock: simplistic client-side calculation based on unlockTime cadence (30 min)
@@ -55,6 +58,7 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
   // Auto-unlock logic: attempt server unlock when countdown reaches zero or on mount (in case user arrives late)
   const triggering = useRef(false)
   const attemptUnlock = async () => {
+    if (!currentSessionId) return // no active session
     if (triggering.current) return
     triggering.current = true
     try {
@@ -71,8 +75,21 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
           const r = await fetch('/api/student/questions', { cache: 'no-store' })
           if (r.ok) {
             const d = await r.json()
-            setQuestions(d.questions as Question[])
-            if (d.startedAt && d.startedAt !== startedAt) setStartedAt(d.startedAt as string)
+            if (!d.sessionId) {
+              // Session ended: reset local state
+              setCurrentSessionId(null)
+              setQuestions([])
+              setStartedAt(null)
+              setTarget(0)
+              setNextUnlock(null)
+            } else {
+              if (d.sessionId !== currentSessionId) {
+                setCurrentSessionId(d.sessionId as string)
+              }
+              setQuestions(d.questions as Question[])
+              if (d.startedAt && d.startedAt !== startedAt) setStartedAt(d.startedAt as string)
+              if (typeof d.target === 'number') setTarget(d.target)
+            }
           }
         } catch {}
       }
@@ -100,7 +117,7 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
 
   // Realtime updates
   useEffect(() => {
-    if (!sessionId) return
+    if (!currentSessionId) return
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
     const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
     const supabase = createClient(url, anon)
@@ -129,16 +146,74 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
           return [...prev, dataNew]
         })
       })
+      // NOTE: DELETE events omitted because Supabase realtime for deletes requires replica identity full
+      // (otherwise payload.old may be empty -> runtime error in transformer). We already reset state on session end.
       .subscribe()
 
     return () => {
       supabase.removeChannel(qSub)
     }
-  }, [sessionId])
+  }, [currentSessionId])
+
+  // When there is NO active session: lightweight polling + realtime listen for new Session rows
+  useEffect(() => {
+    if (currentSessionId) return
+    let stopped = false
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/student/questions', { cache: 'no-store' })
+        if (!r.ok) return
+        const d = await r.json()
+        if (stopped) return
+        if (d.sessionId) {
+          // Attach to new session
+            setCurrentSessionId(d.sessionId)
+            setQuestions(d.questions || [])
+            setStartedAt(d.startedAt || null)
+            if (typeof d.target === 'number') setTarget(d.target)
+        }
+      } catch {}
+    }
+    poll()
+    const id = setInterval(poll, 10000)
+
+    // Realtime subscription for Session INSERT (new active day)
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    const supabase = createClient(url, anon)
+    const insSub = supabase
+      .channel('student-session-discovery')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'Session' }, (payload) => {
+        const row: any = payload.new
+        if (row?.active) {
+          setCurrentSessionId(row.id)
+          setTarget(row.target || 0)
+          setStartedAt(row.startedAt || null)
+          // fetch questions to populate
+          fetch('/api/student/questions', { cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (d && d.sessionId === row.id) {
+                setQuestions(d.questions || [])
+                if (d.startedAt) setStartedAt(d.startedAt)
+                if (typeof d.target === 'number') setTarget(d.target)
+              }
+            })
+            .catch(() => {})
+        }
+      })
+      .subscribe()
+
+    return () => {
+      stopped = true
+      clearInterval(id)
+      supabase.removeChannel(insSub)
+    }
+  }, [currentSessionId])
 
   // Polling fallback every 10s to fetch latest questions
   useEffect(() => {
-    if (!sessionId) return
+  if (!currentSessionId) return
     let stopped = false
     const fetchNow = async () => {
       try {
@@ -146,10 +221,18 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
         if (!res.ok) return
         const data = await res.json()
         if (stopped) return
-        setQuestions(data.questions as Question[])
-        if (data.startedAt && data.startedAt !== startedAt) {
-          setStartedAt(data.startedAt as string)
+        if (!data.sessionId) {
+          // Session ended between polls
+          setCurrentSessionId(null)
+          setQuestions([])
+          setStartedAt(null)
+          setTarget(0)
+          setNextUnlock(null)
+          return
         }
+        setQuestions(data.questions as Question[])
+        if (data.startedAt && data.startedAt !== startedAt) setStartedAt(data.startedAt as string)
+        if (typeof data.target === 'number') setTarget(data.target)
       } catch {}
     }
     fetchNow()
@@ -158,12 +241,12 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
       stopped = true
       clearInterval(id)
     }
-  }, [sessionId])
+  }, [currentSessionId])
 
   // Fast polling bootstrap: poll every 2s right after mount / session start until an unlocked (or viewed/completed) question appears,
   // or until timeout (~120s). Useful when realtime delivery of the first unlock is delayed.
   useEffect(() => {
-    if (!sessionId) return
+  if (!currentSessionId) return
     if (questions.some((q) => q.status !== 'locked')) return // already have unlocked content
     let attempts = 0
     let stopped = false
@@ -177,8 +260,19 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
         if (r.ok) {
           const d = await r.json()
           if (stopped) return
+          if (!d.sessionId) {
+            setCurrentSessionId(null)
+            setQuestions([])
+            setStartedAt(null)
+            setTarget(0)
+            setNextUnlock(null)
+            stopped = true
+            clearInterval(intervalId)
+            return
+          }
           setQuestions(d.questions as Question[])
           if (d.startedAt && d.startedAt !== startedAt) setStartedAt(d.startedAt as string)
+          if (typeof d.target === 'number') setTarget(d.target)
           if ((d.questions as Question[]).some((q: Question) => q.status !== 'locked')) {
             stopped = true
             clearInterval(intervalId)
@@ -198,35 +292,51 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
       stopped = true
       clearInterval(intervalId)
     }
-  }, [sessionId, questions, startedAt])
+  }, [currentSessionId, questions, startedAt])
 
-  // Realtime listen for session start (Session.startedAt update) if we have a sessionId but no startedAt yet
+  // Realtime listen for any session updates (active flips false or startedAt set)
   useEffect(() => {
-    if (!sessionId || startedAt) return
+    if (!currentSessionId) return
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
     const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
     const supabase = createClient(url, anon)
-    const sSub = supabase
+    const sessSub = supabase
       .channel('student-session')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'Session', filter: `id=eq.${sessionId}` }, (payload) => {
-        const newStarted = (payload.new as any)?.startedAt
-        if (newStarted && !startedAt) {
-          setStartedAt(newStarted)
-          // Immediately fetch questions/unlocks
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'Session', filter: `id=eq.${currentSessionId}` }, (payload) => {
+        const newRow: any = payload.new
+        const becameInactive = newRow && newRow.active === false
+        const newStarted = newRow?.startedAt
+        if (becameInactive) {
+          // Immediate reset
+            setCurrentSessionId(null)
+            setQuestions([])
+            setStartedAt(null)
+            setTarget(0)
+            setNextUnlock(null)
+          // Optional confirmation fetch (in case of race on deletes)
           fetch('/api/student/questions', { cache: 'no-store' })
             .then((r) => (r.ok ? r.json() : null))
             .then((d) => {
-              if (d?.questions) setQuestions(d.questions as Question[])
-              if (d?.startedAt) setStartedAt(d.startedAt as string)
+              if (d && d.sessionId) {
+                // Edge case: a new session started instantly
+                setCurrentSessionId(d.sessionId)
+                setQuestions(d.questions || [])
+                if (d.startedAt) setStartedAt(d.startedAt)
+                if (typeof d.target === 'number') setTarget(d.target)
+              }
             })
             .catch(() => {})
+          return
+        }
+        if (newStarted && !startedAt) {
+          setStartedAt(newStarted)
         }
       })
       .subscribe()
     return () => {
-      supabase.removeChannel(sSub)
+      supabase.removeChannel(sessSub)
     }
-  }, [sessionId, startedAt])
+  }, [currentSessionId, startedAt])
 
   const pending = questions.filter((q) => q.status === 'unlocked' || q.status === 'viewed')
   const done = questions.filter((q) => q.status === 'completed')
