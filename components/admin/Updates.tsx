@@ -130,7 +130,7 @@ export default function Updates({ initialQuestions, initialActivity, sessionId }
     <div className="space-y-4">
       <div className="flex gap-2">
         <Button variant={tab === 'unopened' ? 'primary' : 'outline'} onClick={() => setTab('unopened')}>
-          Unopened ({unopened.length})
+          Locked ({unopened.length})
         </Button>
         <Button variant={tab === 'viewed' ? 'secondary' : 'outline'} onClick={() => setTab('viewed')}>
           Viewed ({viewed.length})
@@ -162,6 +162,8 @@ export default function Updates({ initialQuestions, initialActivity, sessionId }
         </div>
       )}
 
+      <hr style={{ height: '1px', border: 'none', backgroundColor: '#6A5ACD' }} />
+      
       <div className="space-y-2">
         <div className="font-medium">Activity Log</div>
         <ul className="space-y-1 text-sm">
