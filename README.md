@@ -13,7 +13,7 @@ A Next.js app that delivers a daily set of questions to students with scheduled 
 -   [Environment Variables](#environment-variables)
 -   [Setup](#setup)
 -   [Usage](#usage)
--   [Scheduled Unlocks (CRON)](#scheduled-unlocks-cron)
+    // Removed CRON scheduling; unlocks are triggered by authenticated clients.
 -   [Supabase Realtime](#supabase-realtime)
 -   [Available Scripts](#available-scripts)
 -   [Security Notes](#security-notes)
@@ -29,8 +29,8 @@ A Next.js app that delivers a daily set of questions to students with scheduled 
     -   Set a target number of questions (locked after first upload)
     -   Upload question screenshots (stored in Supabase Storage, auto-numbered)
     -   Start/End the day
-    -   Unlock questions in batches of 3 (manual button or CRON API)
-    -   Live updates for question states and activity log
+-   Unlock questions in batches of 3 (manual button or automatic timed unlock requests)
+-   Live updates for question states and activity log
 -   Student
     -   See countdown to next unlock (client-side estimate: last unlock + 30 min)
     -   View unlocked question images
@@ -42,7 +42,7 @@ A Next.js app that delivers a daily set of questions to students with scheduled 
         -   Admin: `admin` / `admin123`
         -   Student: `student` / `student123`
 -   API
-    -   `POST /api/unlock` to unlock up to 3 locked questions (Bearer `CRON_SECRET`)
+    -   `POST /api/unlock` to unlock up to 3 locked questions (student/admin authenticated; enforces 30‑min interval)
 
 ## Tech Stack
 
@@ -103,10 +103,11 @@ Copy `.env.example` to `.env` and fill in values.
 -   `DATABASE_URL` — Postgres pooled connection (app runtime)
 -   `DIRECT_URL` — Postgres direct connection (Prisma CLI)
 -   `AUTH_SECRET` — Random string for HMAC session signing
--   `CRON_SECRET` — Secret for `/api/unlock` endpoint
 -   `NEXT_PUBLIC_SUPABASE_URL` — Supabase URL (public)
 -   `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase anon key (public)
 -   `SUPABASE_SERVICE_KEY` — Supabase service role key (server-only, Storage)
+-   `UNLOCK_INTERVAL_MINUTES` — (optional) Interval in minutes for automatic unlock cadence (server fallback)
+-   `NEXT_PUBLIC_UNLOCK_INTERVAL_MINUTES` — (optional) Same as above but also exposed to client for display; takes precedence if both set
 
 The app auto-creates a `questions` bucket on first upload.
 
@@ -149,18 +150,11 @@ Student flow:
 3. Expand a question to view image
 4. Mark Viewed / Completed
 
-## Scheduled Unlocks (CRON)
+## Automatic Timed Unlocks
 
--   Endpoint: `POST /api/unlock`
--   Header: `Authorization: Bearer <CRON_SECRET>`
+Every 30 minutes (measured from the last successful unlock batch or the session start) a student or admin visiting the site will trigger a `POST /api/unlock` request automatically from the browser when the local countdown reaches 00:00. The server authoritatively checks whether the interval has elapsed; if it is too early it returns `{"message":"Too early", nextUnlockAt}` allowing clients to synchronize. When eligible, up to 3 locked questions are unlocked and a `nextUnlockAt` timestamp is returned for the following interval.
 
-```bash
-curl -X POST \
-  -H "Authorization: Bearer $CRON_SECRET" \
-  http://localhost:3000/api/unlock
-```
-
-Configure a platform cron (e.g., Vercel Cron) to call this periodically (e.g., every 30 minutes).
+This removes the need for external CRON infrastructure.
 
 ## Supabase Realtime
 
@@ -180,7 +174,7 @@ Ensure Realtime is enabled for the `public` schema or specifically the `Question
 ## Security Notes
 
 -   Sessions are HMAC-signed tokens in HTTP-only cookies; suitable for a demo but consider a hardened approach for production.
--   Keep `SUPABASE_SERVICE_KEY` and `CRON_SECRET` server-only.
+-   Keep `SUPABASE_SERVICE_KEY` server-only.
 -   Storage upload size limited to 10MB per file (see `lib/storage.ts`).
 
 ## Troubleshooting

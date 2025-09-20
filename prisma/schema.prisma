@@ -29,6 +29,8 @@ model Session {
   active    Boolean    @default(true)
   createdAt DateTime   @default(now())
   questions Question[]
+
+  @@index([active, createdAt])
 }
 
 model Question {

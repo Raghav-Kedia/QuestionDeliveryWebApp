@@ -1,5 +1,6 @@
 "use client"
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { UNLOCK_INTERVAL_MS } from '@/lib/unlock-config'
 import { createClient } from '@supabase/supabase-js'
 import { markViewed, markCompleted } from '@/app/student/actions'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -16,18 +17,24 @@ type Question = {
   createdAt: string
 }
 
-export default function StudentDashboard({ sessionId, startedAt, target, questions: initialQuestions }: { sessionId: string | null; startedAt: string | null; target: number; questions: Question[] }) {
+export default function StudentDashboard({ sessionId, startedAt: initialStartedAt, target, questions: initialQuestions }: { sessionId: string | null; startedAt: string | null; target: number; questions: Question[] }) {
   const [questions, setQuestions] = useState<Question[]>(initialQuestions)
+  const [startedAt, setStartedAt] = useState<string | null>(initialStartedAt)
   const completed = questions.filter((q) => q.status === 'completed').length
 
   // Countdown to next unlock: simplistic client-side calculation based on unlockTime cadence (30 min)
   const [nextUnlock, setNextUnlock] = useState<string | null>(null)
   useEffect(() => {
-    if (!startedAt) return
-    // Estimate next unlock as last unlock + 30min or start + 30min if none
+    // If we have any unlocked question, base on its latest unlockTime even if startedAt was null at initial render.
     const unlockedTimes = questions.filter((q) => q.unlockTime).map((q) => new Date(q.unlockTime as string).getTime())
-    const base = unlockedTimes.length ? Math.max(...unlockedTimes) : new Date(startedAt).getTime()
-    const next = new Date(base + 30 * 60 * 1000)
+    let base: number | null = null
+    if (unlockedTimes.length) {
+      base = Math.max(...unlockedTimes)
+    } else if (startedAt) {
+      base = new Date(startedAt).getTime()
+    }
+    if (base == null) return // still no reference point
+    const next = new Date(base + UNLOCK_INTERVAL_MS)
     setNextUnlock(next.toISOString())
   }, [questions, startedAt])
 
@@ -45,6 +52,52 @@ export default function StudentDashboard({ sessionId, startedAt, target, questio
     return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
   }, [nextUnlock, now])
 
+  // Auto-unlock logic: attempt server unlock when countdown reaches zero or on mount (in case user arrives late)
+  const triggering = useRef(false)
+  const attemptUnlock = async () => {
+    if (triggering.current) return
+    triggering.current = true
+    try {
+      const res = await fetch('/api/unlock', { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.nextUnlockAt) {
+          setNextUnlock(data.nextUnlockAt)
+        } else if (data.message === 'Too early' && data.nextUnlockAt) {
+          setNextUnlock(data.nextUnlockAt)
+        }
+        // Force refresh of questions immediately (avoid waiting for realtime/poll)
+        try {
+          const r = await fetch('/api/student/questions', { cache: 'no-store' })
+          if (r.ok) {
+            const d = await r.json()
+            setQuestions(d.questions as Question[])
+            if (d.startedAt && d.startedAt !== startedAt) setStartedAt(d.startedAt as string)
+          }
+        } catch {}
+      }
+    } catch {
+      // ignore network errors silently
+    } finally {
+      setTimeout(() => {
+        triggering.current = false
+      }, 5000)
+    }
+  }
+
+  // On mount: attempt sync regardless of startedAt (handles case where session starts after initial render)
+  useEffect(() => {
+    attemptUnlock()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // When countdown hits 00:00 trigger unlock (debounced by triggering ref)
+  useEffect(() => {
+    if (countdown === '00:00') {
+      attemptUnlock()
+    }
+  }, [countdown])
+
   // Realtime updates
   useEffect(() => {
     if (!sessionId) return
@@ -54,17 +107,26 @@ export default function StudentDashboard({ sessionId, startedAt, target, questio
 
     const qSub = supabase
       .channel('student-questions')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'Question' }, (payload) => {
-        const data = payload.new as Question
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'Question' }, (payload) => {
         setQuestions((prev) => {
-          const idx = prev.findIndex((q) => q.id === data.id)
+          const dataNew = payload.new as Question | null
+          if (!dataNew) return prev
+          const idx = prev.findIndex((q) => q.id === dataNew.id)
+          if (idx >= 0) return prev
+          return [...prev, dataNew]
+        })
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'Question' }, (payload) => {
+        setQuestions((prev) => {
+          const dataNew = payload.new as Question | null
+          if (!dataNew) return prev
+          const idx = prev.findIndex((q) => q.id === dataNew.id)
           if (idx >= 0) {
             const next = [...prev]
-            next[idx] = data
+            next[idx] = dataNew
             return next
-          } else {
-            return [...prev, data]
           }
+          return [...prev, dataNew]
         })
       })
       .subscribe()
@@ -85,6 +147,9 @@ export default function StudentDashboard({ sessionId, startedAt, target, questio
         const data = await res.json()
         if (stopped) return
         setQuestions(data.questions as Question[])
+        if (data.startedAt && data.startedAt !== startedAt) {
+          setStartedAt(data.startedAt as string)
+        }
       } catch {}
     }
     fetchNow()
@@ -95,6 +160,74 @@ export default function StudentDashboard({ sessionId, startedAt, target, questio
     }
   }, [sessionId])
 
+  // Fast polling bootstrap: poll every 2s right after mount / session start until an unlocked (or viewed/completed) question appears,
+  // or until timeout (~120s). Useful when realtime delivery of the first unlock is delayed.
+  useEffect(() => {
+    if (!sessionId) return
+    if (questions.some((q) => q.status !== 'locked')) return // already have unlocked content
+    let attempts = 0
+    let stopped = false
+    let intervalId: any
+
+    const fastFetch = async () => {
+      attempts++
+      if (stopped) return
+      try {
+        const r = await fetch('/api/student/questions', { cache: 'no-store' })
+        if (r.ok) {
+          const d = await r.json()
+          if (stopped) return
+          setQuestions(d.questions as Question[])
+          if (d.startedAt && d.startedAt !== startedAt) setStartedAt(d.startedAt as string)
+          if ((d.questions as Question[]).some((q: Question) => q.status !== 'locked')) {
+            stopped = true
+            clearInterval(intervalId)
+            return
+          }
+        }
+      } catch {}
+      if (attempts >= 60) {
+        stopped = true
+        clearInterval(intervalId)
+      }
+    }
+
+    intervalId = setInterval(fastFetch, 2000)
+    fastFetch()
+    return () => {
+      stopped = true
+      clearInterval(intervalId)
+    }
+  }, [sessionId, questions, startedAt])
+
+  // Realtime listen for session start (Session.startedAt update) if we have a sessionId but no startedAt yet
+  useEffect(() => {
+    if (!sessionId || startedAt) return
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    const supabase = createClient(url, anon)
+    const sSub = supabase
+      .channel('student-session')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'Session', filter: `id=eq.${sessionId}` }, (payload) => {
+        const newStarted = (payload.new as any)?.startedAt
+        if (newStarted && !startedAt) {
+          setStartedAt(newStarted)
+          // Immediately fetch questions/unlocks
+          fetch('/api/student/questions', { cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (d?.questions) setQuestions(d.questions as Question[])
+              if (d?.startedAt) setStartedAt(d.startedAt as string)
+            })
+            .catch(() => {})
+        }
+      })
+      .subscribe()
+    return () => {
+      supabase.removeChannel(sSub)
+    }
+  }, [sessionId, startedAt])
+
   const pending = questions.filter((q) => q.status === 'unlocked' || q.status === 'viewed')
   const done = questions.filter((q) => q.status === 'completed')
 
@@ -104,7 +237,7 @@ export default function StudentDashboard({ sessionId, startedAt, target, questio
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Student Panel</h1>
-            <p className="text-sm text-muted-foreground">Solve questions as they unlock every 30 minutes.</p>
+            <p className="text-sm text-muted-foreground">Solve questions as they unlock every {UNLOCK_INTERVAL_MS / 60000} minutes.</p>
           </div>
           <form action={logout}>
             <Button variant="outline" type="submit">Logout</Button>

@@ -24,11 +24,16 @@ export async function setTarget(formData: FormData) {
     if (active.uploaded > 0) {
       throw new Error('Cannot change target after first upload')
     }
-    await prisma.session.update({ where: { id: active.id }, data: { target } })
+    if (active.target === target) {
+      // No change, return early without triggering revalidation
+      return
+    }
+    await prisma.session.update({ where: { id: active.id }, data: { target }, select: { id: true } })
   } else {
-    await prisma.session.create({ data: { target, active: true } })
+    await prisma.session.create({ data: { target, active: true }, select: { id: true } })
   }
-  revalidatePath('/admin')
+  // Fire-and-forget to reduce perceived latency
+  ;(async () => { try { revalidatePath('/admin') } catch {} })()
 }
 
 export async function startDay() {
@@ -67,12 +72,14 @@ export async function endDay() {
   await prisma.$transaction(async (tx: Tx) => {
     // Purge activity
     await tx.userActivity.deleteMany({ where: { question: { sessionId: active.id } } })
-    // Delete completed questions
-    await tx.question.deleteMany({ where: { sessionId: active.id, status: 'completed' } })
+    // Delete all questions for the session (regardless of status)
+    await tx.question.deleteMany({ where: { sessionId: active.id } })
     // Mark session inactive and ended
     await tx.session.update({ where: { id: active.id }, data: { active: false, endedAt: new Date() } })
   })
   revalidatePath('/admin')
+  // Ensure students see updated state promptly
+  revalidatePath('/student')
 }
 
 export async function unlockNow() {
@@ -111,7 +118,8 @@ export async function uploadQuestion(formData: FormData): Promise<void> {
   if (!active) throw new Error('No active session')
   if (active.uploaded >= active.target) throw new Error('Upload target reached')
 
-  await ensureBucket()
+  // Start bucket ensure early (memoized) so we can in parallel prep metadata
+  const bucketPromise = ensureBucket()
 
   // Generate path and upload outside the DB transaction to keep the tx short
   const ext = (file.type && file.type.split('/')[1]) || 'png'
@@ -119,20 +127,31 @@ export async function uploadQuestion(formData: FormData): Promise<void> {
   const basePath = `${active.id}/${randomUUID()}.${ext}`
   let imageUrl: string | null = null
   try {
+    // Ensure bucket ready before actual upload (fast no-op on subsequent calls)
+    await bucketPromise
     imageUrl = await uploadImage(basePath, file)
   } catch (e) {
     throw new Error('Failed to upload image to storage')
   }
 
-  // Short transaction: compute next number, create question, increment uploaded
-  // Add a small retry loop to avoid conflicts under concurrency
+  // New approach: treat Session.uploaded as counter. We increment first (with optimistic concurrency) and use the incremented value as question number.
+  // This avoids scanning the Question table (aggregate max) each upload.
   const maxRetries = 3
   let lastErr: unknown = null
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       await prisma.$transaction(async (tx: Tx) => {
-        const max = await tx.question.aggregate({ where: { sessionId: active.id }, _max: { number: true } })
-        const number = (max._max.number ?? 0) + 1
+        // Re-fetch session row FOR UPDATE equivalent via update returning (Prisma doesn't expose FOR UPDATE directly)
+        // Approach: increment uploaded, then use resulting value as number.
+        const updatedSession = await tx.session.update({
+          where: { id: active.id },
+          data: { uploaded: { increment: 1 } },
+        })
+        if (updatedSession.uploaded > updatedSession.target) {
+          // Rollback by throwing; target exceeded (race condition)
+          throw new Error('Upload target reached')
+        }
+        const number = updatedSession.uploaded // The newly assigned sequential number
         await tx.question.create({
           data: {
             sessionId: active.id,
@@ -141,22 +160,24 @@ export async function uploadQuestion(formData: FormData): Promise<void> {
             status: 'locked',
           },
         })
-        await tx.session.update({ where: { id: active.id }, data: { uploaded: { increment: 1 } } })
       })
       lastErr = null
       break
-    } catch (e) {
+    } catch (e: any) {
       lastErr = e
-      // Backoff a bit before retrying
-      await new Promise((r) => setTimeout(r, 100 * attempt))
+      if (e?.message === 'Upload target reached') break
+      await new Promise((r) => setTimeout(r, 50 * attempt))
     }
   }
-
   if (lastErr) {
-    // Best-effort cleanup: we cannot easily delete by path from storage.ts, implement here if needed in future
-    // For now, we leave the uploaded asset to avoid cascading errors during admin flow
+    if ((lastErr as any)?.message === 'Upload target reached') {
+      throw lastErr
+    }
     throw new Error('Failed to save question to database. Please retry.')
   }
 
-  revalidatePath('/admin')
+  // Fire-and-forget revalidation to reduce tail latency
+  ;(async () => {
+    try { revalidatePath('/admin'); } catch {}
+  })()
 }

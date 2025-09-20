@@ -28,6 +28,26 @@ export default function Updates({ initialQuestions, initialActivity, sessionId }
   const [questions, setQuestions] = useState<Question[]>(initialQuestions)
   const [activity, setActivity] = useState<Activity[]>(initialActivity)
 
+  // Sync down new props (e.g., after endDay revalidation) — if counts/ids shrink we replace local state.
+  useEffect(() => {
+    // Build simple signatures to detect meaningful changes
+    const incomingQSig = initialQuestions.map((q) => q.id + ':' + q.status).join('|')
+    const currentQSig = questions.map((q) => q.id + ':' + q.status).join('|')
+    if (incomingQSig !== currentQSig) {
+      setQuestions(initialQuestions)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuestions])
+
+  useEffect(() => {
+    const incomingASig = initialActivity.map((a) => a.id).join('|')
+    const currentASig = activity.map((a) => a.id).join('|')
+    if (incomingASig !== currentASig) {
+      setActivity(initialActivity)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialActivity])
+
   useEffect(() => {
     if (!sessionId) return
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -36,26 +56,41 @@ export default function Updates({ initialQuestions, initialActivity, sessionId }
 
     const qSub = supabase
       .channel('questions-updates')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'Question' }, (payload) => {
+      // Only listen to INSERT and UPDATE to avoid null payload.new on DELETE
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'Question' }, (payload) => {
         setQuestions((prev) => {
-          const data = payload.new as Question
-          const idx = prev.findIndex((q) => q.id === data.id)
+          const dataNew = payload.new as Question | null
+          if (!dataNew) return prev
+          const idx = prev.findIndex((q) => q.id === dataNew.id)
           if (idx >= 0) {
             const next = [...prev]
-            next[idx] = data
+            next[idx] = dataNew
             return next
-          } else {
-            return [...prev, data]
           }
+          return [...prev, dataNew]
+        })
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'Question' }, (payload) => {
+        setQuestions((prev) => {
+          const dataNew = payload.new as Question | null
+          if (!dataNew) return prev // Guard against null new
+          const idx = prev.findIndex((q) => q.id === dataNew.id)
+          if (idx >= 0) {
+            const next = [...prev]
+            next[idx] = dataNew
+            return next
+          }
+          return [...prev, dataNew]
         })
       })
       .subscribe()
 
     const aSub = supabase
       .channel('activity-updates')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'UserActivity' }, (payload) => {
-        const data = payload.new as Activity
-        setActivity((prev) => [{ ...data }, ...prev].slice(0, 100))
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'UserActivity' }, (payload) => {
+        const dataNew = payload.new as Activity | null
+        if (!dataNew) return
+        setActivity((prev) => [{ ...dataNew }, ...prev].slice(0, 100))
       })
       .subscribe()
 

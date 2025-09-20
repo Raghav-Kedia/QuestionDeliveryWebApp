@@ -22,9 +22,15 @@ export async function login(formData: FormData) {
     } as any,
   })
   const pwdHash = (user as any)?.passwordHash as string | undefined
-  if (!user || !pwdHash) throw new Error('Invalid credentials')
+  if (!user || !pwdHash) {
+    const ts = Date.now()
+    redirect('/login?error=' + encodeURIComponent('Invalid username or password') + '&t=' + ts)
+  }
   const ok = verifyPassword(password, pwdHash)
-  if (!ok) throw new Error('Invalid credentials')
+  if (!ok) {
+    const ts = Date.now()
+    redirect('/login?error=' + encodeURIComponent('Invalid username or password') + '&t=' + ts)
+  }
   const role = (user.role === 'admin' ? 'admin' : 'student') as 'admin' | 'student'
   await setSession(user.id, role)
   redirect(role === 'admin' ? '/admin' : '/student')

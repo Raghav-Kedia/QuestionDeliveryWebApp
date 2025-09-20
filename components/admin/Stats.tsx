@@ -11,6 +11,16 @@ type Question = {
 export default function Stats({ initialQuestions, sessionId }: { initialQuestions: Question[]; sessionId: string | null }) {
   const [questions, setQuestions] = useState<Question[]>(initialQuestions)
 
+  // Keep local state in sync with incoming server props (e.g., after endDay).
+  useEffect(() => {
+    const incomingSig = initialQuestions.map((q) => q.id + ':' + q.status).join('|')
+    const currentSig = questions.map((q) => q.id + ':' + q.status).join('|')
+    if (incomingSig !== currentSig) {
+      setQuestions(initialQuestions)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuestions])
+
   // Supabase Realtime for question changes
   useEffect(() => {
     if (!sessionId) return
@@ -20,8 +30,17 @@ export default function Stats({ initialQuestions, sessionId }: { initialQuestion
 
     const qSub = supabase
       .channel('admin-stats-questions')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'Question' }, (payload) => {
-        const data = payload.new as Question
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'Question' }, (payload) => {
+        const data = payload.new as Question | null
+        if (!data) return
+        setQuestions((prev) => {
+          if (prev.some((q) => q.id === data.id)) return prev
+          return [...prev, data]
+        })
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'Question' }, (payload) => {
+        const data = payload.new as Question | null
+        if (!data) return
         setQuestions((prev) => {
           const idx = prev.findIndex((q) => q.id === data.id)
           if (idx >= 0) {

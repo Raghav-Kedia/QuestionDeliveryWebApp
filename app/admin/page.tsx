@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma'
 import { requireRole } from '@/lib/auth'
 import { setTarget, uploadQuestion, startDay, endDay, unlockNow } from './actions'
+import UploadQuestionForm from '@/components/admin/UploadQuestionForm'
 import Updates from '@/components/admin/Updates'
 import Stats from '@/components/admin/Stats'
 import { Card } from '@/components/ui/card'
@@ -98,12 +99,10 @@ export default async function AdminPage() {
 
         <Card className="p-4 space-y-4">
           <h2 className="font-medium">Upload Question</h2>
-          <p className="text-sm text-muted-foreground">Upload screenshots one-by-one. Auto-numbered.</p>
-          <form action={uploadQuestion} className="flex items-center gap-2">
-            <input type="file" name="file" accept="image/*" className="rounded-na-input border px-3 py-2" disabled={!session || uploaded >= target} required />
-            <Button type="submit" variant="secondary" disabled={!session || uploaded >= target}>Upload</Button>
-          </form>
-          <p className="text-xs text-muted-foreground">Allowed up to target count.</p>
+          <p className="text-sm text-muted-foreground">Upload screenshots one-by-one. Auto-numbered. Images are compressed client-side.</p>
+          {/* New client-side compression + upload component (still calls legacy server action). */}
+          <UploadQuestionForm disabled={!session || uploaded >= target} />
+          <p className="text-xs text-muted-foreground">Allowed up to target count. Large images downscaled to 1600px & WebP.</p>
         </Card>
       </section>
 
