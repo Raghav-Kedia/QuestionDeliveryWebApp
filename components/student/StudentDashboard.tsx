@@ -395,17 +395,40 @@ export default function StudentDashboard({ sessionId, startedAt: initialStartedA
             {pending.map((q) => (
               <Card key={q.id} className="p-3">
                 <div className="mb-2 text-sm font-medium">Question {q.number}</div>
-                <details className="mb-3 cursor-pointer">
+                {/* Hidden form to mark viewed automatically when screenshot is first revealed */}
+                <form id={`auto-view-${q.id}`} action={markViewed} style={{ display: 'none' }}>
+                  <input type="hidden" name="questionId" value={q.id} />
+                </form>
+                <details
+                  className="mb-3 cursor-pointer"
+                  onToggle={(e) => {
+                    const el = e.currentTarget
+                    if (!el.open) return
+                    // only auto-mark if currently unlocked (not yet viewed/completed)
+                    setQuestions((prev) => {
+                      const idx = prev.findIndex((pq) => pq.id === q.id)
+                      if (idx === -1) return prev
+                      const targetQ = prev[idx]
+                      if (targetQ.status !== 'unlocked') return prev
+                      // optimistic update
+                      const clone = [...prev]
+                      clone[idx] = { ...targetQ, status: 'viewed' }
+                      // submit form after state update (microtask)
+                      queueMicrotask(() => {
+                        const form = document.getElementById(`auto-view-${q.id}`) as HTMLFormElement | null
+                        form?.requestSubmit()
+                      })
+                      return clone
+                    })
+                  }}
+                >
                   <summary className="select-none text-sm text-muted-foreground">Show screenshot</summary>
                   <div className="mt-2">
                     <img src={q.imageUrl} alt={`Question ${q.number}`} className="h-auto w-full rounded-na-card" />
                   </div>
                 </details>
                 <div className="flex gap-2">
-                  <form action={markViewed}>
-                    <input type="hidden" name="questionId" value={q.id} />
-                    <Button variant="secondary" type="submit">Mark Viewed</Button>
-                  </form>
+                  {/* Mark Viewed button removed; auto-handled above */}
                   <form action={markCompleted}>
                     <input type="hidden" name="questionId" value={q.id} />
                     <Button variant="primary" type="submit">Mark Complete</Button>
